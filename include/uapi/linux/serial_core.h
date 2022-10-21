@@ -276,4 +276,7 @@
 /* Sunplus UART */
 #define PORT_SUNPLUS	123
 
+/* FT260 HID UART */
+#define PORT_FT260	124
+
 #endif /* _UAPILINUX_SERIAL_CORE_H */
