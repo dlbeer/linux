@@ -202,6 +202,31 @@ int ad_sd_reset(struct ad_sigma_delta *sigma_delta,
 }
 EXPORT_SYMBOL_NS_GPL(ad_sd_reset, IIO_AD_SIGMA_DELTA);
 
+static int ad_sd_wait_and_disable(struct ad_sigma_delta *sigma_delta,
+				  unsigned long timeout)
+{
+	const int ret = wait_for_completion_interruptible_timeout(
+			&sigma_delta->completion, timeout);
+
+	if (!ret) {
+		/* Just because the completion timed out, doesn't mean that the
+		 * IRQ didn't fire. It might be in progress right now.
+		 */
+		disable_irq(sigma_delta->spi->irq);
+
+		/* The IRQ handler may have run after all. If that happened,
+		 * then we will now have double-disabled the IRQ, and irq_dis
+		 * will be true (having been set in the handler).
+		 */
+		if (sigma_delta->irq_dis)
+			enable_irq(sigma_delta->spi->irq);
+		else
+			sigma_delta->irq_dis = true;
+	}
+
+	return ret;
+}
+
 int ad_sd_calibrate(struct ad_sigma_delta *sigma_delta,
 	unsigned int mode, unsigned int channel)
 {
@@ -223,14 +248,11 @@ int ad_sd_calibrate(struct ad_sigma_delta *sigma_delta,
 
 	sigma_delta->irq_dis = false;
 	enable_irq(sigma_delta->spi->irq);
-	timeout = wait_for_completion_timeout(&sigma_delta->completion, 2 * HZ);
-	if (timeout == 0) {
-		sigma_delta->irq_dis = true;
-		disable_irq_nosync(sigma_delta->spi->irq);
+	timeout = ad_sd_wait_and_disable(sigma_delta, 2 * HZ);
+	if (timeout == 0)
 		ret = -EIO;
-	} else {
+	else
 		ret = 0;
-	}
 out:
 	sigma_delta->keep_cs_asserted = false;
 	ad_sigma_delta_set_mode(sigma_delta, AD_SD_MODE_IDLE);
@@ -296,8 +318,7 @@ int ad_sigma_delta_single_conversion(struct iio_dev *indio_dev,
 
 	sigma_delta->irq_dis = false;
 	enable_irq(sigma_delta->spi->irq);
-	ret = wait_for_completion_interruptible_timeout(
-			&sigma_delta->completion, HZ);
+	ret = ad_sd_wait_and_disable(sigma_delta, HZ);
 
 	if (ret == 0)
 		ret = -EIO;
@@ -314,11 +335,6 @@ int ad_sigma_delta_single_conversion(struct iio_dev *indio_dev,
 		&raw_sample);
 
 out:
-	if (!sigma_delta->irq_dis) {
-		disable_irq_nosync(sigma_delta->spi->irq);
-		sigma_delta->irq_dis = true;
-	}
-
 	sigma_delta->keep_cs_asserted = false;
 	ad_sigma_delta_set_mode(sigma_delta, AD_SD_MODE_IDLE);
 	sigma_delta->bus_locked = false;
@@ -411,12 +427,7 @@ static int ad_sd_buffer_postdisable(struct iio_dev *indio_dev)
 	struct ad_sigma_delta *sigma_delta = iio_device_get_drvdata(indio_dev);
 
 	reinit_completion(&sigma_delta->completion);
-	wait_for_completion_timeout(&sigma_delta->completion, HZ);
-
-	if (!sigma_delta->irq_dis) {
-		disable_irq_nosync(sigma_delta->spi->irq);
-		sigma_delta->irq_dis = true;
-	}
+	ad_sd_wait_and_disable(sigma_delta, HZ);
 
 	sigma_delta->keep_cs_asserted = false;
 	ad_sigma_delta_set_mode(sigma_delta, AD_SD_MODE_IDLE);
